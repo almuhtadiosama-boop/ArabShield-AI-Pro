@@ -11,8 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from lime.lime_text import LimeTextExplainer
-
-
+from url_intelligence import analyze_text_urls, check_virustotal_url, calculate_unified_risk
 # ==========================================
 # 1. إعداد الصفحة
 # ==========================================
@@ -596,6 +595,167 @@ if page == "🏠 الرئيسية":
                 st.progress(scam_probability)
 
                 # ==================================
+                # فحص الروابط - ArabShield URL Intelligence
+                # ==================================
+
+                st.divider()
+                st.subheader("🔗 تحليل الروابط - ArabShield URL Intelligence")
+
+                url_results = analyze_text_urls(conversation)
+                vt_results = []
+
+                st.divider()
+                st.subheader("🔗 تحليل الروابط - ArabShield URL Intelligence")
+
+                if not url_results:
+                    st.info("لم يتم العثور على روابط داخل الرسالة.")
+                else:
+                    st.caption(
+                        "يحلل النظام خصائص الرابط محليًا، ويستعلم عن VirusTotal عند إعداد المفتاح. "
+                        "قد تُشارك الروابط مع خدمة خارجية عند تفعيلها."
+                    )
+
+                    vt_api_key = st.secrets.get("VIRUSTOTAL_API_KEY", "")
+                    for url_index, url_result in enumerate(url_results, start=1):
+                        with st.expander(
+                            f"الرابط {url_index}: {url_result['host'] or 'تعذر تحديد النطاق'} "
+                            f"| مؤشرات محلية: {url_result['level']}",
+                            expanded=True
+                        ):
+                            st.code(url_result["url"], language=None)
+                            metric_col1, metric_col2 = st.columns(2)
+                            metric_col1.metric("مؤشر الرابط المحلي", f"{url_result['score']}/100")
+                            metric_col2.metric("التقييم المحلي", url_result["level"])
+                            for flag in url_result["flags"]:
+                                st.write(f"• {flag}")
+
+                            if vt_api_key:
+                                with st.spinner("جاري التحقق من سمعة الرابط عبر VirusTotal..."):
+                                    vt_result = check_virustotal_url(url_result["url"], vt_api_key)
+                                vt_results.append(vt_result)
+                                st.markdown("**🌐 نتيجة VirusTotal**")
+                                if vt_result.get("status") == "report":
+                                    stats = vt_result.get("stats", {})
+                                    malicious = int(stats.get("malicious", 0))
+                                    suspicious = int(stats.get("suspicious", 0))
+                                    harmless = int(stats.get("harmless", 0))
+                                    undetected = int(stats.get("undetected", 0))
+                                    c1, c2, c3, c4 = st.columns(4)
+                                    c1.metric("ضار", malicious)
+                                    c2.metric("مشبوه", suspicious)
+                                    c3.metric("سليم", harmless)
+                                    c4.metric("لم يُكتشف", undetected)
+                                    st.markdown(f"[فتح تقرير VirusTotal]({vt_result['permalink']})")
+                                elif vt_result.get("status") == "submitted":
+                                    st.info(vt_result["message"])
+                                    st.markdown(f"[فتح صفحة الرابط في VirusTotal]({vt_result['permalink']})")
+                                else:
+                                    st.warning(vt_result.get("message", "تعذر الحصول على نتيجة VirusTotal."))
+                            else:
+                                vt_results.append({"status": "not_configured"})
+                                st.caption("VirusTotal غير مفعّل: أضف VIRUSTOTAL_API_KEY إلى Streamlit Secrets.")
+
+                # ==================================
+                # التقييم الموحد للمخاطر
+                # ==================================
+                unified = calculate_unified_risk(
+                    scam_probability,
+                    url_results,
+                    vt_results
+                )
+
+                st.divider()
+                st.subheader("🛡️ التقرير الأمني - ArabShield Security Report")
+
+                # Executive summary for non-technical users
+                if unified["level"] == "مرتفع":
+                    st.error(
+                        f"🔴 **الخلاصة: خطورة مرتفعة** — رُصدت مؤشرات تستدعي التعامل مع الرسالة "
+                        f"على أنها تهديد محتمل. مؤشر المخاطر: **{unified['score']}/100**."
+                    )
+                    summary_text = (
+                        f"الرسالة تحمل مؤشرات خطورة مرتفعة (مؤشر {unified['score']}/100). "
+                        "تجنب فتح الروابط أو مشاركة أي معلومات أو رموز تحقق."
+                    )
+                elif unified["level"] == "متوسط":
+                    st.warning(
+                        f"🟠 **الخلاصة: خطورة متوسطة** — توجد مؤشرات تحتاج إلى تحقق إضافي. "
+                        f"مؤشر المخاطر: **{unified['score']}/100**."
+                    )
+                    summary_text = (
+                        f"الرسالة تحمل مؤشرات خطورة متوسطة (مؤشر {unified['score']}/100). "
+                        "تحقق من الجهة عبر قنواتها الرسمية قبل التفاعل."
+                    )
+                else:
+                    st.success(
+                        f"🟢 **الخلاصة: مؤشرات منخفضة** — لم تظهر مؤشرات قوية في الفحوص المتاحة. "
+                        f"مؤشر المخاطر: **{unified['score']}/100**."
+                    )
+                    summary_text = (
+                        f"لم تظهر مؤشرات قوية في الفحوص المتاحة (مؤشر {unified['score']}/100). "
+                        "هذا لا يضمن سلامة الرسالة أو الرابط."
+                    )
+
+                score_col, level_col = st.columns([2, 1])
+                score_col.metric("مؤشر المخاطر الموحد", f"{unified['score']}/100")
+                level_col.metric("مستوى الخطورة", unified["level"])
+                st.progress(unified["score"] / 100)
+
+                st.markdown("### 📊 نتائج محركات التحليل")
+                risk_cols = st.columns(3)
+                risk_cols[0].metric("🧠 LSTM", f"{unified['lstm_score']}/100")
+                risk_cols[1].metric(
+                    "🔗 تحليل الرابط",
+                    f"{unified['local_score']}/100" if unified["local_score"] is not None else "لا يوجد رابط"
+                )
+                risk_cols[2].metric(
+                    "🌐 VirusTotal",
+                    f"{unified['virustotal_score']}/100" if unified["virustotal_score"] is not None else "لا توجد نتيجة"
+                )
+
+                st.markdown("### 🔎 لماذا ظهرت هذه النتيجة؟")
+                for reason in unified["reasons"]:
+                    st.markdown(f"- {reason}")
+
+                # Actionable recommendations based on available findings
+                st.markdown("### 🧭 التوصيات الأمنية")
+                recommendations = []
+                if unified["level"] == "مرتفع":
+                    recommendations.extend([
+                        "لا تفتح الرابط ولا تحمّل أي ملف منه.",
+                        "لا تُدخل كلمة مرور أو رمز تحقق أو بيانات بطاقة/حساب.",
+                        "تحقق من العرض أو الرسالة عبر التطبيق أو الموقع الرسمي للجهة، بكتابة عنوانه بنفسك.",
+                    ])
+                elif unified["level"] == "متوسط":
+                    recommendations.extend([
+                        "لا تتفاعل مع الرابط حتى تتحقق من مصدر الرسالة.",
+                        "تواصل مع الجهة عبر رقمها أو موقعها الرسمي المعروف، وليس عبر بيانات الرسالة.",
+                        "لا تشارك رموز التحقق أو بيانات الدفع.",
+                    ])
+                else:
+                    recommendations.extend([
+                        "لم تظهر مؤشرات قوية، لكن لا تعتبر ذلك ضمانًا للسلامة.",
+                        "تأكد من اسم النطاق والجهة قبل إدخال أي بيانات.",
+                        "لا تشارك كلمات المرور أو رموز التحقق عبر روابط تصل في الرسائل.",
+                    ])
+                if url_results:
+                    recommendations.append(
+                        "إذا كان الرابط يخص جهة معروفة، افتح موقعها الرسمي بكتابة عنوانه يدويًا بدل استخدام رابط الرسالة."
+                    )
+                for item in recommendations:
+                    st.markdown(f"- {item}")
+
+                st.caption(
+                    "هذا المؤشر التجريبي أداة فرز إرشادية وليس احتمالًا إحصائيًا أو حكمًا قاطعًا. "
+                    "النتيجة تعتمد على الفحوص المتاحة وقد تتغير مع تحديث تقارير السمعة."
+                )
+
+                st.warning(
+                    "تنبيه: لا تفتح الروابط المشبوهة، ولا تدخل كلمات المرور أو رموز التحقق أو بيانات الدفع."
+                )
+
+
+                # ==================================
                 # تفسير LIME
                 # ==================================
 
@@ -763,21 +923,146 @@ elif page == "📚 سجل التحليلات":
 
 elif page == "ℹ️ حول النظام":
 
-    st.header("حول ArabShield AI Pro")
+    st.markdown(
+        """
+        <div style="text-align:center; padding: 12px 8px 20px;">
+            <div style="font-size:42px;">🛡️</div>
+            <h1 style="margin:4px 0 8px; color:#087F8C;">ArabShield AI Pro</h1>
+            <p style="font-size:16px; color:#64748b; margin:0;">
+                نظام ذكي لتحليل مؤشرات الاحتيال الإلكتروني في المحادثات العربية
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    st.write("""
-    ArabShield AI Pro هو نظام ذكي يهدف إلى اكتشاف
-    مؤشرات الاحتيال الإلكتروني في المحادثات العربية
-    باستخدام تقنيات التعلم العميق وشبكات LSTM.
-    """)
+    st.markdown(
+        """
+        <div style="background:rgba(8,127,140,.07); border:1px solid rgba(8,127,140,.18);
+                    border-radius:14px; padding:18px 20px; line-height:1.9; text-align:right;">
+            <h3 style="margin-top:0; color:#087F8C;">نبذة عن النظام</h3>
+            <p>يهدف <b>ArabShield AI Pro</b> إلى اكتشاف مؤشرات الاحتيال الإلكتروني
+            في المحادثات العربية باستخدام تقنيات التعلم العميق وشبكات LSTM.</p>
+            <p>يحلل النظام النصوص ويستخدم تقنية <b>LIME</b> لتفسير الكلمات التي
+            ساهمت في قرار التصنيف، كما يفحص الروابط محليًا ويتحقق من سمعتها عبر
+            <b>VirusTotal</b> عند تفعيل الخدمة، ثم يعرض تقييمًا أمنيًا موحدًا.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    st.write("""
-    يعتمد النظام على نموذج تعلم عميق لتحليل النصوص،
-    ويستخدم تقنية LIME لتفسير الكلمات التي ساهمت
-    في اتخاذ قرار التصنيف.
-    """)
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div style="text-align:center; margin:8px 0 16px;">
+            <h2 style="margin-bottom:4px;">👨‍💻 البرمجة والتطوير</h2>
+            <div style="font-size:19px; font-weight:700; color:#087F8C;">
+                Osama Almuhtadi
+            </div>
+            <div style="font-size:13px; color:#64748b; margin-top:4px;">
+                مطوّر النظام
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    st.write("""
-    تم تطوير واجهة النظام باستخدام Streamlit،
-    ويستخدم LIME لتقديم تفسير محلي لنتائج النموذج.
-    """)
+    # Contact cards with recognizable official brand marks.
+    st.markdown(
+        """
+        <style>
+        .as-contact-grid {
+            display:grid;
+            grid-template-columns:repeat(2,minmax(0,1fr));
+            gap:12px;
+            direction:rtl;
+        }
+        .as-contact-card {
+            display:flex; align-items:center; gap:12px;
+            padding:14px 15px; border-radius:13px;
+            border:1px solid rgba(148,163,184,.28);
+            background:rgba(148,163,184,.07);
+            min-height:66px; box-sizing:border-box;
+        }
+        .as-contact-icon {
+            width:42px; height:42px; flex:0 0 42px;
+            display:flex; align-items:center; justify-content:center;
+            border-radius:12px; background:white;
+        }
+        .as-contact-title {font-size:12px; color:#64748b; margin-bottom:3px;}
+        .as-contact-value {font-size:15px; font-weight:650; overflow-wrap:anywhere;}
+        .as-contact-value a {text-decoration:none; color:inherit;}
+        @media(max-width:520px) {
+            .as-contact-grid {grid-template-columns:1fr;}
+        }
+        </style>
+
+        <div class="as-contact-grid">
+          <div class="as-contact-card">
+            <div class="as-contact-icon">
+              <svg viewBox="0 0 24 24" width="27" height="27" aria-label="Phone">
+                <path fill="#16A34A" d="M6.6 10.8a15.5 15.5 0 006.6 6.6l2.2-2.2a1 1 0 011.02-.24c1.12.37 2.32.57 3.58.57a1 1 0 011 1V20a1 1 0 01-1 1C10.6 21 3 13.4 3 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.26.2 2.46.57 3.58a1 1 0 01-.25 1.02z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="as-contact-title">الهاتف</div>
+              <div class="as-contact-value" dir="ltr"><a href="tel:+967776998979">+967 776 998 979</a></div>
+            </div>
+          </div>
+
+          <div class="as-contact-card">
+            <div class="as-contact-icon">
+              <svg viewBox="0 0 24 24" width="29" height="29" aria-label="Facebook">
+                <path fill="#1877F2" d="M24 12.07C24 5.4 18.63 0 12 0S0 5.4 0 12.07C0 18.09 4.39 23.08 10.13 24v-8.44H7.08v-3.49h3.05V9.41c0-3.03 1.79-4.72 4.54-4.72 1.31 0 2.68.24 2.68.24v2.96h-1.51c-1.49 0-1.95.93-1.95 1.88v2.3h3.32l-.53 3.49h-2.79V24C19.61 23.08 24 18.09 24 12.07z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="as-contact-title">فيسبوك</div>
+              <div class="as-contact-value">اسامه محمد المهتدي</div>
+            </div>
+          </div>
+
+          <div class="as-contact-card">
+            <div class="as-contact-icon">
+              <svg viewBox="0 0 24 24" width="29" height="29" aria-label="Instagram">
+                <defs>
+                  <linearGradient id="asInsta" x1="0" y1="1" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#FFB000"/>
+                    <stop offset="48%" stop-color="#F00075"/>
+                    <stop offset="100%" stop-color="#7B35C8"/>
+                  </linearGradient>
+                </defs>
+                <rect x="2" y="2" width="20" height="20" rx="6" fill="none" stroke="url(#asInsta)" stroke-width="2.2"/>
+                <circle cx="12" cy="12" r="4.3" fill="none" stroke="url(#asInsta)" stroke-width="2.2"/>
+                <circle cx="18" cy="6.5" r="1.35" fill="#F00075"/>
+              </svg>
+            </div>
+            <div>
+              <div class="as-contact-title">إنستجرام</div>
+              <div class="as-contact-value"><a href="https://www.instagram.com/oos7a/" target="_blank" rel="noopener">@oos7a</a></div>
+            </div>
+          </div>
+
+          <div class="as-contact-card">
+            <div class="as-contact-icon">
+              <svg viewBox="0 0 24 24" width="29" height="29" aria-label="Telegram">
+                <circle cx="12" cy="12" r="11" fill="#229ED9"/>
+                <path fill="#fff" d="M18.9 6.8L16.4 18c-.19.79-.7.98-1.42.61l-3.93-2.9-1.9 1.83c-.21.21-.39.39-.8.39l.28-4 7.28-6.58c.32-.28-.07-.44-.49-.16L6.42 13l-3.83-1.2c-.83-.26-.85-.83.17-1.23l14.97-5.77c.69-.25 1.29.17 1.17 1.99z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="as-contact-title">تليجرام</div>
+              <div class="as-contact-value"><a href="https://t.me/oos7a" target="_blank" rel="noopener">@oos7a</a></div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.divider()
+    st.markdown(
+        "<div style='text-align:center;color:#94a3b8;font-size:12px;'>"
+        "ArabShield AI Pro © 2026</div>",
+        unsafe_allow_html=True
+    )
